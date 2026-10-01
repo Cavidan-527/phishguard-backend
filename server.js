@@ -50,6 +50,12 @@ async function initTransporter() {
         user: testAccount.user,
         pass: testAccount.pass,
       },
+      // CRITICAL: without these, a blocked/slow outbound SMTP connection
+      // (common on free hosting tiers) hangs forever and the request never
+      // resolves, leaving the frontend stuck on "Göndərilir...".
+      connectionTimeout: 10000, // max time to establish TCP connection
+      greetingTimeout: 10000,   // max time to wait for SMTP greeting
+      socketTimeout: 15000,     // max time of inactivity on the socket
     });
 
     transporterReady = true;
@@ -169,12 +175,26 @@ app.post('/api/send', async (req, res) => {
     const link = `${FRONTEND_URL}/landing`;
     const { subject, html } = buildEmailHtml(template, link);
 
-    const info = await transporter.sendMail({
-      from: '"Corporate IT Security" <security@phishguard-sim.test>',
-      to: email,
-      subject,
-      html,
-    });
+    // Second safety net: even with transporter-level timeouts, race against
+    // an explicit timeout so this route ALWAYS responds within ~20s and the
+    // frontend button never stays stuck on "Göndərilir...".
+    const sendWithTimeout = (mailOptions, ms) =>
+      Promise.race([
+        transporter.sendMail(mailOptions),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('SMTP bağlantısı vaxt aşımına uğradı (timeout).')), ms)
+        ),
+      ]);
+
+    const info = await sendWithTimeout(
+      {
+        from: '"Corporate IT Security" <security@phishguard-sim.test>',
+        to: email,
+        subject,
+        html,
+      },
+      20000
+    );
 
     const previewUrl = nodemailer.getTestMessageUrl(info) || null;
 
