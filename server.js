@@ -5,11 +5,9 @@ const nodemailer = require('nodemailer');
 
 const app = express();
 
-// CORS və JSON middleware
 app.use(cors());
 app.use(express.json());
 
-// Şəbəkə daxilində statistika və loglar (In-memory storage)
 let stats = {
   sent: 0,
   clicks: 0,
@@ -17,29 +15,25 @@ let stats = {
   logs: []
 };
 
-// Ethereal Transporter obyektini saxlayacaq dəyişən
 let transporter = null;
 
-// Ethereal SMTP serverinə qoşulma funksiyası
-async function getTransporter() {
-  if (!transporter) {
-    console.log('🔄 Ethereal Email test hesabı yaradılır...');
-    const testAccount = await nodemailer.createTestAccount();
-    transporter = nodemailer.createTransport({
-      host: 'smtp.ethereal.email',
-      port: 587,
-      secure: false,
-      auth: {
-        user: testAccount.user,
-        pass: testAccount.pass,
-      },
-    });
-    console.log('✅ Ethereal SMTP hesabı uğurla yaradıldı:', testAccount.user);
-  }
-  return transporter;
-}
+// Ethereal hesabı server işə düşən kimi arxa fonda yaradılır (donmanın qarşısını almaq üçün)
+console.log('🔄 Ethereal Email test hesabı yaradılır...');
+nodemailer.createTestAccount().then((testAccount) => {
+  transporter = nodemailer.createTransport({
+    host: 'smtp.ethereal.email',
+    port: 587,
+    secure: false,
+    auth: {
+      user: testAccount.user,
+      pass: testAccount.pass,
+    },
+  });
+  console.log('✅ Ethereal SMTP hesabı uğurla yaradıldı:', testAccount.user);
+}).catch((err) => {
+  console.error('❌ Ethereal hesabı yaradıla bilmədi:', err.message);
+});
 
-// Şablonların məzmunu və başlıqları
 const TEMPLATE_CONTENTS = {
   it_password: {
     subject: '🚨 TƏCİLİ: Korporativ IT Şifrənizin Müddəti Bitir',
@@ -64,24 +58,21 @@ const TEMPLATE_CONTENTS = {
   }
 };
 
-// Frontend Landing Səhifəsi Ünvanı
-const LANDING_URL = process.env.FRONTEND_URL || 'https://phishguard-mauve.vercel.app/landing';
+// DOĞRU FRONTEND LİNKİ
+const LANDING_URL = 'https://phishguard-mauve.vercel.app/landing';
 
 // ---------------------------------------------------------------------------
 // API ENDPOINTS
 // ---------------------------------------------------------------------------
 
-// Server işləkliyini yoxlamaq üçün (Health check)
 app.get('/', (req, res) => {
   res.send('🛡️ PhishGuard Backend API işlək vəziyyətdədir.');
 });
 
-// Statistika və logları gətirən endpoint
 app.get('/api/stats', (req, res) => {
   res.json(stats);
 });
 
-// Simulyasiya göndərən endpoint
 app.post('/api/send', async (req, res) => {
   const { email, template } = req.body;
 
@@ -89,13 +80,14 @@ app.post('/api/send', async (req, res) => {
     return res.status(400).json({ error: 'Hədəf e-poçt ünvanı daxil edilməlidir.' });
   }
 
+  if (!transporter) {
+    return res.status(500).json({ error: 'Ethereal serveri hələ hazır deyil, 3-5 saniyə sonra yenidən cəhd edin.' });
+  }
+
   const selectedTemplate = TEMPLATE_CONTENTS[template] || TEMPLATE_CONTENTS.it_password;
 
   try {
-    const mailer = await getTransporter();
-
-    // E-poçt göndərilir
-    const info = await mailer.sendMail({
+    const info = await transporter.sendMail({
       from: `"${selectedTemplate.fromName}" <security@sirket-portal.az>`,
       to: email,
       subject: selectedTemplate.subject,
@@ -105,7 +97,7 @@ app.post('/api/send', async (req, res) => {
           <p style="font-size: 15px; color: #475569; line-height: 1.6;">Hörmətli əməkdaş,</p>
           <p style="font-size: 15px; color: #475569; line-height: 1.6;">${selectedTemplate.bodyText}</p>
           <div style="margin: 24px 0; text-align: center;">
-            <a href="${LANDING_URL}" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px;">
+            <a href="${LANDING_URL}" target="_blank" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px;">
               ${selectedTemplate.buttonText}
             </a>
           </div>
@@ -115,10 +107,8 @@ app.post('/api/send', async (req, res) => {
       `,
     });
 
-    // Ethereal ünvanında real məktubun linkini əldə edirik
     const previewUrl = nodemailer.getTestMessageUrl(info);
 
-    // Statistika və logları yeniləyirik
     stats.sent += 1;
     stats.lastPreviewUrl = previewUrl;
     stats.logs.unshift({
@@ -144,14 +134,12 @@ app.post('/api/send', async (req, res) => {
   }
 });
 
-// Tələyə düşənlərin (klikləyənlərin) qeydiyyatı
 app.post('/api/track', (req, res) => {
   const { email } = req.body;
 
   stats.clicks += 1;
 
   if (email) {
-    // Uyğun email üzrə son logun statusunu yeniləyirik
     const existingLog = stats.logs.find((l) => l.email === email);
     if (existingLog) {
       existingLog.statusLabel = '⚠️ Tələyə Düşdü (Klikləndi)';
@@ -162,7 +150,6 @@ app.post('/api/track', (req, res) => {
   return res.json({ success: true });
 });
 
-// Serverin başlatılması
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 PhishGuard Backend serveri ${PORT} portunda çalışır.`);
