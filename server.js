@@ -9,7 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Şəbəkə daxilində statistika və loglar (In-memory storage)
+// In-memory statistikalar və loglar
 let stats = {
   sent: 0,
   clicks: 0,
@@ -39,7 +39,17 @@ async function getTransporter() {
   return transporter;
 }
 
-// Şablonların məzmunu və başlıqları
+// Landing URL-ni dinamik və xətasız formalaşdıran funksiya
+function getLandingUrl() {
+  let baseUrl = process.env.FRONTEND_URL || 'https://phishguard-mauve.vercel.app';
+  baseUrl = baseUrl.trim().replace(/\/$/, ''); // Sonundakı '/' işarəsini təmizləyirik
+  if (!baseUrl.endsWith('/landing')) {
+    baseUrl += '/landing';
+  }
+  return baseUrl;
+}
+
+// Şablonların məzmunu
 const TEMPLATE_CONTENTS = {
   it_password: {
     subject: '🚨 TƏCİLİ: Korporativ IT Şifrənizin Müddəti Bitir',
@@ -64,24 +74,18 @@ const TEMPLATE_CONTENTS = {
   }
 };
 
-// Frontend Landing Səhifəsi Ünvanı
-const LANDING_URL = process.env.FRONTEND_URL || 'https://phishguard-kiber-tahlukaszlik.vercel.app/landing';
-
 // ---------------------------------------------------------------------------
 // API ENDPOINTS
 // ---------------------------------------------------------------------------
 
-// Server işləkliyini yoxlamaq üçün (Health check)
 app.get('/', (req, res) => {
   res.send('🛡️ PhishGuard Backend API işlək vəziyyətdədir.');
 });
 
-// Statistika və logları gətirən endpoint
 app.get('/api/stats', (req, res) => {
   res.json(stats);
 });
 
-// Simulyasiya göndərən endpoint
 app.post('/api/send', async (req, res) => {
   const { email, template } = req.body;
 
@@ -90,11 +94,11 @@ app.post('/api/send', async (req, res) => {
   }
 
   const selectedTemplate = TEMPLATE_CONTENTS[template] || TEMPLATE_CONTENTS.it_password;
+  const targetLandingUrl = getLandingUrl();
 
   try {
     const mailer = await getTransporter();
 
-    // E-poçt göndərilir
     const info = await mailer.sendMail({
       from: `"${selectedTemplate.fromName}" <security@sirket-portal.az>`,
       to: email,
@@ -105,7 +109,7 @@ app.post('/api/send', async (req, res) => {
           <p style="font-size: 15px; color: #475569; line-height: 1.6;">Hörmətli əməkdaş,</p>
           <p style="font-size: 15px; color: #475569; line-height: 1.6;">${selectedTemplate.bodyText}</p>
           <div style="margin: 24px 0; text-align: center;">
-            <a href="${LANDING_URL}" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px;">
+            <a href="${targetLandingUrl}" target="_blank" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px;">
               ${selectedTemplate.buttonText}
             </a>
           </div>
@@ -115,10 +119,8 @@ app.post('/api/send', async (req, res) => {
       `,
     });
 
-    // Ethereal ünvanında real məktubun linkini əldə edirik
     const previewUrl = nodemailer.getTestMessageUrl(info);
 
-    // Statistika və logları yeniləyirik
     stats.sent += 1;
     stats.lastPreviewUrl = previewUrl;
     stats.logs.unshift({
@@ -128,7 +130,7 @@ app.post('/api/send', async (req, res) => {
       statusLabel: 'Göndərildi (Simulyasiya)'
     });
 
-    console.log(`✉️ Məktub göndərildi: ${email} | Preview: ${previewUrl}`);
+    console.log(`✉️ Məktub göndərildi: ${email} | Landing Link: ${targetLandingUrl}`);
 
     return res.json({
       success: true,
@@ -144,14 +146,12 @@ app.post('/api/send', async (req, res) => {
   }
 });
 
-// Tələyə düşənlərin (klikləyənlərin) qeydiyyatı
 app.post('/api/track', (req, res) => {
   const { email } = req.body;
 
   stats.clicks += 1;
 
   if (email) {
-    // Uyğun email üzrə son logun statusunu yeniləyirik
     const existingLog = stats.logs.find((l) => l.email === email);
     if (existingLog) {
       existingLog.statusLabel = '⚠️ Tələyə Düşdü (Klikləndi)';
@@ -162,7 +162,6 @@ app.post('/api/track', (req, res) => {
   return res.json({ success: true });
 });
 
-// Serverin başlatılması
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 PhishGuard Backend serveri ${PORT} portunda çalışır.`);
