@@ -6,7 +6,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Statistikaları yaddaşda saxlayırıq
+const PORT = process.env.PORT || 3001;
+
+// Yaddaşda saxlanılan statistika məlumatları
 let stats = {
   sent: 0,
   clicks: 0,
@@ -14,50 +16,97 @@ let stats = {
   logs: []
 };
 
+let transporter;
+
+// Ethereal Saxta SMTP Hesabının yaradılması
+nodemailer.createTestAccount((err, account) => {
+  if (err) {
+    console.error('Ethereal hesabı yaradıla bilmədi:', err);
+    return;
+  }
+  transporter = nodemailer.createTransport({
+    host: account.smtp.host,
+    port: account.smtp.port,
+    secure: account.smtp.secure,
+    auth: {
+      user: account.user,
+      pass: account.pass
+    }
+  });
+  console.log('Ethereal SMTP Xidməti Hazırdır!');
+});
+
+// API: Statistikanı almaq
 app.get('/api/stats', (req, res) => {
   res.json(stats);
 });
 
+// API: Fişinq simulyasiya e-poçtu göndərmək
 app.post('/api/send', async (req, res) => {
-  const { email } = req.body;
-  stats.sent += 1;
-  
-  // Fake test poçt hesabı
-  const testAccount = await nodemailer.createTestAccount(); 
-  const transporter = nodemailer.createTransport({
-      host: "smtp.ethereal.email", port: 587, 
-      auth: { user: testAccount.user, pass: testAccount.pass }
-  });
+  const { email, template } = req.body;
 
-  const info = await transporter.sendMail({
-      from: '"IT-Support@your-company.com" <admin@phishguard.demo>',
-      to: email,
-      subject: "Təcili: Parolunuzun vaxtı bitir - Təsdiqləyin",
+  if (!transporter) {
+    return res.status(500).json({ error: 'SMTP xidməti hələ başladılır, 5 saniyə sonra yenidən cəhd edin.' });
+  }
+
+  try {
+    const mailOptions = {
+      from: '"IT Security Support" <security@company.com>',
+      to: email || 'user@example.com',
+      subject: '🚨 Təcili: Hesabınızın Təhlükəsizlik Yenilənməsi',
       html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; max-width: 500px;">
-          <h3 style="color: #c0392b;">İstifadəçi Diqqətinə!</h3>
-          <p>Hesabınızda şübhəli fəaliyyət aşkar edilmişdir. Girişin dayandırılmaması üçün 24 saat ərzində şifrənizi təsdiqləyin.</p>
-          <br/>
-          <a href="http://localhost:3000/landing" style="background: #e74c3c; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Hesabınızı Təsdiqləyin</a>
-          <br/><br/>
-          <hr/>
-          <small style="color: #7f8c8d;">PhishGuard Security Simulation System</small>
+        <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f4f4f4;">
+          <div style="background-color: #ffffff; padding: 30px; border-radius: 8px;">
+            <h2 style="color: #d9534f;">Hesabınız Bloklana Bilər!</h2>
+            <p>Hörmətli əməkdaş,</p>
+            <p>Şirkətimizin təhlükəsizlik siyasətinə əsasən, 24 saat ərzində daxil olub şifrənizi təsdiqləməlisiniz.</p>
+            <p>Aşağıdakı keçidə daxil olun:</p>
+            <a href="https://phishguard-app.vercel.app/landing" style="display: inline-block; padding: 12px 20px; background-color: #0275d8; color: white; text-decoration: none; border-radius: 4px;">Şifrəni Yenilə</a>
+          </div>
         </div>
       `
-  });
+    };
 
-  stats.lastPreviewUrl = nodemailer.getTestMessageUrl(info);
-  stats.logs.unshift({ email, date: new Date().toLocaleTimeString(), status: 'Göndərildi' });
+    const info = await transporter.sendMail(mailOptions);
+    const previewUrl = nodemailer.getTestMessageUrl(info);
 
-  res.json(stats);
+    stats.sent += 1;
+    stats.lastPreviewUrl = previewUrl;
+    stats.logs.unshift({
+      email: email || 'user@example.com',
+      date: new Date().toLocaleTimeString(),
+      status: 'Göndərildi 🟢'
+    });
+
+    res.json({
+      success: true,
+      previewUrl: previewUrl,
+      lastPreviewUrl: previewUrl,
+      sent: stats.sent,
+      clicks: stats.clicks,
+      logs: stats.logs
+    });
+  } catch (error) {
+    console.error('Göndərmə xətası:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// API: Fişinq linkinə kliklənməni izləmək
 app.post('/api/track', (req, res) => {
   stats.clicks += 1;
-  if (stats.logs.length > 0) {
-    stats.logs[0].status = '🚨 Klikləndi (Tələyə düşdü)';
-  }
-  res.json(stats);
+  stats.logs.unshift({
+    email: 'Naməlum Əməkdaş',
+    date: new Date().toLocaleTimeString(),
+    status: 'Tələyə Düşdü 🚨'
+  });
+  res.json({ success: true, clicks: stats.clicks });
 });
 
-app.listen(3001, () => console.log('Backend 3001 portunda hazırdır!'));
+app.get('/', (req, res) => {
+  res.send('PhishGuard Backend Live Service Running!');
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
