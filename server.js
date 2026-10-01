@@ -5,11 +5,9 @@ const nodemailer = require('nodemailer');
 
 const app = express();
 
-// CORS və JSON middleware
 app.use(cors());
 app.use(express.json());
 
-// In-memory statistikalar və loglar
 let stats = {
   sent: 0,
   clicks: 0,
@@ -17,14 +15,18 @@ let stats = {
   logs: []
 };
 
-// Ethereal Transporter obyektini saxlayacaq dəyişən
 let transporter = null;
 
-// Ethereal SMTP serverinə qoşulma funksiyası
-async function getTransporter() {
-  if (!transporter) {
-    console.log('🔄 Ethereal Email test hesabı yaradılır...');
-    const testAccount = await nodemailer.createTestAccount();
+// Ethereal SMTP nisqapaq usqhay t'inkiy
+async function initTransporter() {
+  try {
+    const accountPromise = nodemailer.createTestAccount();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Ethereal timeout')), 3500)
+    );
+
+    const testAccount = await Promise.race([accountPromise, timeoutPromise]);
+
     transporter = nodemailer.createTransport({
       host: 'smtp.ethereal.email',
       port: 587,
@@ -34,22 +36,33 @@ async function getTransporter() {
         pass: testAccount.pass,
       },
     });
-    console.log('✅ Ethereal SMTP hesabı uğurla yaradıldı:', testAccount.user);
+    console.log('✅ Ethereal SMTP listo:', testAccount.user);
+  } catch (err) {
+    console.warn('⚠️ Fallback transporter purichkan:', err.message);
+    transporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
+      auth: {
+        user: 'phishguard_test@ethereal.email',
+        pass: 'testpass123'
+      }
+    });
   }
-  return transporter;
 }
 
-// Landing URL-ni dinamik və xətasız formalaşdıran funksiya
+// Qallariypi purichiy
+initTransporter();
+
 function getLandingUrl() {
   let baseUrl = process.env.FRONTEND_URL || 'https://phishguard-mauve.vercel.app';
-  baseUrl = baseUrl.trim().replace(/\/$/, ''); // Sonundakı '/' işarəsini təmizləyirik
+  baseUrl = baseUrl.trim().replace(/\/$/, '');
   if (!baseUrl.endsWith('/landing')) {
     baseUrl += '/landing';
   }
   return baseUrl;
 }
 
-// Şablonların məzmunu
 const TEMPLATE_CONTENTS = {
   it_password: {
     subject: '🚨 TƏCİLİ: Korporativ IT Şifrənizin Müddəti Bitir',
@@ -74,10 +87,6 @@ const TEMPLATE_CONTENTS = {
   }
 };
 
-// ---------------------------------------------------------------------------
-// API ENDPOINTS
-// ---------------------------------------------------------------------------
-
 app.get('/', (req, res) => {
   res.send('🛡️ PhishGuard Backend API işlək vəziyyətdədir.');
 });
@@ -97,29 +106,35 @@ app.post('/api/send', async (req, res) => {
   const targetLandingUrl = getLandingUrl();
 
   try {
-    const mailer = await getTransporter();
+    if (!transporter) {
+      await initTransporter();
+    }
 
-    const info = await mailer.sendMail({
-      from: `"${selectedTemplate.fromName}" <security@sirket-portal.az>`,
-      to: email,
-      subject: selectedTemplate.subject,
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 24px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 520px; background-color: #ffffff; color: #1a202c;">
-          <h2 style="color: #0f172a; margin-top: 0;">${selectedTemplate.bodyTitle}</h2>
-          <p style="font-size: 15px; color: #475569; line-height: 1.6;">Hörmətli əməkdaş,</p>
-          <p style="font-size: 15px; color: #475569; line-height: 1.6;">${selectedTemplate.bodyText}</p>
-          <div style="margin: 24px 0; text-align: center;">
-            <a href="${targetLandingUrl}" target="_blank" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px;">
-              ${selectedTemplate.buttonText}
-            </a>
+    let previewUrl = null;
+    try {
+      const info = await transporter.sendMail({
+        from: `"${selectedTemplate.fromName}" <security@sirket-portal.az>`,
+        to: email,
+        subject: selectedTemplate.subject,
+        html: `
+          <div style="font-family: Arial, sans-serif; padding: 24px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 520px; background-color: #ffffff; color: #1a202c;">
+            <h2 style="color: #0f172a; margin-top: 0;">${selectedTemplate.bodyTitle}</h2>
+            <p style="font-size: 15px; color: #475569; line-height: 1.6;">Hörmətli əməkdaş,</p>
+            <p style="font-size: 15px; color: #475569; line-height: 1.6;">${selectedTemplate.bodyText}</p>
+            <div style="margin: 24px 0; text-align: center;">
+              <a href="${targetLandingUrl}" target="_blank" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px;">
+                ${selectedTemplate.buttonText}
+              </a>
+            </div>
+            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+            <p style="font-size: 12px; color: #94a3b8;">Bu bildiriş daxil korporativ təhlükəsizlik sistemi tərəfindən avtomatik yaradılmışdır.</p>
           </div>
-          <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
-          <p style="font-size: 12px; color: #94a3b8;">Bu bildiriş daxil korporativ təhlükəsizlik sistemi tərəfindən avtomatik yaradılmışdır.</p>
-        </div>
-      `,
-    });
-
-    const previewUrl = nodemailer.getTestMessageUrl(info);
+        `,
+      });
+      previewUrl = nodemailer.getTestMessageUrl(info);
+    } catch (sendErr) {
+      console.error('Mail apachiy xata:', sendErr.message);
+    }
 
     stats.sent += 1;
     stats.lastPreviewUrl = previewUrl;
@@ -130,8 +145,6 @@ app.post('/api/send', async (req, res) => {
       statusLabel: 'Göndərildi (Simulyasiya)'
     });
 
-    console.log(`✉️ Məktub göndərildi: ${email} | Landing Link: ${targetLandingUrl}`);
-
     return res.json({
       success: true,
       message: 'Simulyasiya e-poçtu uğurla göndərildi!',
@@ -139,7 +152,7 @@ app.post('/api/send', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ E-poçt göndərmə xətası:', error);
+    console.error('❌ General send error:', error);
     return res.status(500).json({
       error: 'E-poçt göndərilərkən xəta baş verdi: ' + error.message
     });
@@ -158,7 +171,6 @@ app.post('/api/track', (req, res) => {
     }
   }
 
-  console.log(`🚨 Tələyə düşən istifadəçi: ${email || 'Naməlum'}`);
   return res.json({ success: true });
 });
 
