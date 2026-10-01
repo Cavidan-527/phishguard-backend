@@ -8,18 +8,21 @@ app.use(express.json());
 
 let stats = { sent: 0, clicks: 0, lastPreviewUrl: null, logs: [] };
 
-let transporter;
+// ⚠️ DİQQƏT: Ethereal.email/create saytından aldığın məlumatları bura yaz!
+const ETHEREAL_USER = 'katelin.price27@ethereal.email'; 
+const ETHEREAL_PASS = 'nWY4XAFg9pjaUYEVjD';
 
-// Ethereal hesabını sadəcə 1 dəfə yaradırıq, donmasın deyə
-nodemailer.createTestAccount().then((acc) => {
-  transporter = nodemailer.createTransport({
-    host: 'smtp.ethereal.email',
-    port: 587,
-    auth: { user: acc.user, pass: acc.pass }
-  });
-}).catch(console.error);
+// Artıq donma olmayacaq, çünki hazır hesabdan istifadə edirik
+const transporter = nodemailer.createTransport({
+  host: 'smtp.ethereal.email',
+  port: 587,
+  auth: {
+    user: ETHEREAL_USER,
+    pass: ETHEREAL_PASS
+  }
+});
 
-// Doğru Vercel linki (mauve)
+// Doğru Vercel linkin
 const LANDING_URL = 'https://phishguard-mauve.vercel.app/landing';
 
 const TEMPLATES = {
@@ -36,9 +39,6 @@ app.get('/api/stats', (req, res) => res.json(stats));
 app.post('/api/send', async (req, res) => {
   const { email, template } = req.body;
   if (!email) return res.status(400).json({ error: 'Email lazımdır' });
-
-  // Ethereal donubsa, qısa xəta verib çıxır (Səhifəni dondurmur)
-  if (!transporter) return res.status(500).json({ error: 'Ethereal serveri donub, 1 dəqiqə sonra yoxlayın.' });
 
   const tpl = TEMPLATES[template] || TEMPLATES.it_password;
 
@@ -65,7 +65,8 @@ app.post('/api/send', async (req, res) => {
 
     res.json({ success: true, previewUrl });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Xəta:", err);
+    res.status(500).json({ error: 'E-poçt göndərilmədi: ' + err.message });
   }
 });
 
