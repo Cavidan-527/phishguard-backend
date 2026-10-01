@@ -1,300 +1,169 @@
-// server.js
-// PhishGuard - Phishing Simulation & Security Awareness Platform (Backend)
-// Node.js + Express + Nodemailer (Ethereal test SMTP)
-
+// server.js - PhishGuard Backend API
 const express = require('express');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
-// Frontend URL used inside the phishing email's link target
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://phishguard-mauve.vercel.app';
-
-// ---------------------------------------------------------------------------
-// MIDDLEWARE
-// ---------------------------------------------------------------------------
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+// CORS və JSON middleware
+app.use(cors());
 app.use(express.json());
 
-// ---------------------------------------------------------------------------
-// IN-MEMORY STATE
-// ---------------------------------------------------------------------------
-const state = {
+// Şəbəkə daxilində statistika və loglar (In-memory storage)
+let stats = {
   sent: 0,
   clicks: 0,
   lastPreviewUrl: null,
-  logs: [], // { id, email, template, status, time }
+  logs: []
 };
 
+// Ethereal Transporter obyektini saxlayacaq dəyişən
 let transporter = null;
-let transporterReady = false;
 
-// ---------------------------------------------------------------------------
-// ETHEREAL TRANSPORTER (ASYNC INIT, NEVER CRASHES THE SERVER)
-// ---------------------------------------------------------------------------
-async function initTransporter() {
-  try {
+// Ethereal SMTP serverinə qoşulma funksiyası
+async function getTransporter() {
+  if (!transporter) {
+    console.log('🔄 Ethereal Email test hesabı yaradılır...');
     const testAccount = await nodemailer.createTestAccount();
-
     transporter = nodemailer.createTransport({
-      host: testAccount.smtp.host,
-      port: testAccount.smtp.port,
-      secure: testAccount.smtp.secure,
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
       auth: {
         user: testAccount.user,
         pass: testAccount.pass,
       },
-      // CRITICAL: without these, a blocked/slow outbound SMTP connection
-      // (common on free hosting tiers) hangs forever and the request never
-      // resolves, leaving the frontend stuck on "Göndərilir...".
-      connectionTimeout: 10000, // max time to establish TCP connection
-      greetingTimeout: 10000,   // max time to wait for SMTP greeting
-      socketTimeout: 15000,     // max time of inactivity on the socket
     });
-
-    transporterReady = true;
-    console.log('✅ Ethereal test SMTP account created:', testAccount.user);
-  } catch (err) {
-    transporterReady = false;
-    console.error('❌ Ethereal transporter init failed:', err.message);
-    // Retry after a delay instead of crashing the process
-    setTimeout(initTransporter, 10000);
+    console.log('✅ Ethereal SMTP hesabı uğurla yaradıldı:', testAccount.user);
   }
+  return transporter;
 }
 
-initTransporter();
+// Şablonların məzmunu və başlıqları
+const TEMPLATE_CONTENTS = {
+  it_password: {
+    subject: '🚨 TƏCİLİ: Korporativ IT Şifrənizin Müddəti Bitir',
+    fromName: 'İT Dəstək Xidməti',
+    bodyTitle: 'Korporativ IT Portalı Bildirişi',
+    bodyText: 'Şifrənizin istifadə müddəti 24 saat ərzində bitir. Giriş imkanını itirməmək üçün şifrənizi təcili yeniləyin.',
+    buttonText: 'Şifrəni İndi Yenilə'
+  },
+  hr_leave: {
+    subject: '📄 Məzuniyyət Müraciətinizin Təsdiqi və Sənəd Yoxlanışı',
+    fromName: 'İnsan Resursları (HR)',
+    bodyTitle: 'HR Məzuniyyət Portalı',
+    bodyText: 'İllik məzuniyyət müraciətinizlə bağlı sənədlərdə dəqiqləşdirmə tələb olunur. Məlumatları yoxlamaq üçün portala daxil olun.',
+    buttonText: 'Müraciətə Bax'
+  },
+  finance_invoice: {
+    subject: '💰 Təcili Ödəniş Tələbi - Faktura #49201',
+    fromName: 'Maliyyə Şöbəsi',
+    bodyTitle: 'Maliyyə və Hesabat Portalı',
+    bodyText: 'Şirkətinizə aid gecikdirilmiş faktura ödənişi aşkar edilmişdir. Cərimə tətbiq olunmaması üçün fakturanı dərhal təsdiqləyin.',
+    buttonText: 'Fakturanı Təsdiqlə'
+  }
+};
+
+// Frontend Landing Səhifəsi Ünvanı
+const LANDING_URL = process.env.FRONTEND_URL || 'https://phishguard-mauve.vercel.app/landing';
 
 // ---------------------------------------------------------------------------
-// EMAIL TEMPLATES
-// ---------------------------------------------------------------------------
-function buildEmailHtml(template, link) {
-  const templates = {
-    it_password: {
-      subject: '⚠️ Şifrənizin Müddəti Bitir — Dərhal Yeniləyin',
-      title: 'IT Dəstək Mərkəzi',
-      body: `
-        <p>Hörmətli istifadəçi,</p>
-        <p>Sistem qeydlərinə əsasən hesabınızın şifrəsinin etibarlılıq müddəti <b>24 saat</b> ərzində bitəcək.
-        Hesabınıza girişin kəsilməməsi üçün aşağıdakı düyməni sıxaraq şifrənizi indi yeniləyin.</p>
-      `,
-      button: 'Şifrəni Yenilə',
-    },
-    hr_leave: {
-      subject: '📄 Məzuniyyət Müraciətiniz üzrə Baxılması Lazımdır',
-      title: 'İnsan Resursları Şöbəsi',
-      body: `
-        <p>Hörmətli əməkdaş,</p>
-        <p>Təqdim etdiyiniz məzuniyyət müraciəti ilə bağlı sistemdə əlavə təsdiq tələb olunur.
-        Zəhmət olmasa, aşağıdakı portal üzərindən məlumatlarınızı təsdiqləyin.</p>
-      `,
-      button: 'Müraciətə Bax',
-    },
-    finance_invoice: {
-      subject: '💰 Ödənilməmiş Faktura Bildirişi',
-      title: 'Maliyyə Departamenti',
-      body: `
-        <p>Hörmətli həmkar,</p>
-        <p>Sisteminizdə ödəniş gözləyən faktura aşkar edilmişdir. Gecikmə faizlərinin yaranmaması üçün
-        faktura detallarını aşağıdakı keçiddən yoxlayın.</p>
-      `,
-      button: 'Fakturaya Bax',
-    },
-  };
-
-  const t = templates[template] || templates.it_password;
-
-  return {
-    subject: t.subject,
-    html: `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
-      <div style="background: #0d1b2a; color: #fff; padding: 20px;">
-        <h2 style="margin: 0;">${t.title}</h2>
-      </div>
-      <div style="padding: 24px; color: #222; background: #fff;">
-        ${t.body}
-        <div style="text-align: center; margin: 28px 0;">
-          <a href="${link}" style="background: #e63946; color: #fff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
-            ${t.button}
-          </a>
-        </div>
-        <p style="font-size: 12px; color: #888;">Bu link 24 saat ərzində etibarlıdır. Əgər bu müraciəti siz etməmisinizsə, bu e-poçtu nəzərə almayın.</p>
-      </div>
-      <div style="background: #f1f1f1; padding: 12px; text-align: center; font-size: 11px; color: #999;">
-        © Corporate IT Security — Daxili Bildiriş Sistemi
-      </div>
-    </div>
-    `,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// ROUTES
+// API ENDPOINTS
 // ---------------------------------------------------------------------------
 
-// Health check
+// Server işləkliyini yoxlamaq üçün (Health check)
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'PhishGuard API', transporterReady });
+  res.send('🛡️ PhishGuard Backend API işlək vəziyyətdədir.');
 });
 
-// GET /api/stats
+// Statistika və logları gətirən endpoint
 app.get('/api/stats', (req, res) => {
-  try {
-    res.json({
-      sent: state.sent,
-      clicks: state.clicks,
-      lastPreviewUrl: state.lastPreviewUrl,
-      logs: state.logs,
-    });
-  } catch (err) {
-    console.error('GET /api/stats error:', err.message);
-    res.status(500).json({ error: 'Stats alınarkən xəta baş verdi.' });
-  }
+  res.json(stats);
 });
 
-// Builds a data-URI preview of the given HTML so the exact email content can
-// still be opened/viewed even when no real SMTP delivery is available.
-function buildSimulatedPreview(html) {
-  const encodedHtml = Buffer.from(html, 'utf-8').toString('base64');
-  return `data:text/html;base64,${encodedHtml}`;
-}
-
-// POST /api/send
+// Simulyasiya göndərən endpoint
 app.post('/api/send', async (req, res) => {
+  const { email, template } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Hədəf e-poçt ünvanı daxil edilməlidir.' });
+  }
+
+  const selectedTemplate = TEMPLATE_CONTENTS[template] || TEMPLATE_CONTENTS.it_password;
+
   try {
-    const { email, template } = req.body || {};
+    const mailer = await getTransporter();
 
-    if (!email || !template) {
-      return res.status(400).json({ error: 'Email və template sahələri tələb olunur.' });
-    }
-
-    const link = `${FRONTEND_URL}/landing`;
-    const { subject, html } = buildEmailHtml(template, link);
-
-    let previewUrl = null;
-    let deliveryMode = 'real'; // 'real' | 'simulated'
-
-    if (!transporterReady || !transporter) {
-      // Ethereal account creation itself needs outbound network access.
-      // If that's blocked/unavailable, skip straight to simulated mode
-      // instead of making the user wait on a 503 that never resolves.
-      console.error('⚠️ Transporter hazır deyil, birbaşa simulyasiya rejiminə keçilir.');
-      deliveryMode = 'simulated';
-      previewUrl = buildSimulatedPreview(html);
-    } else {
-      const sendWithTimeout = (mailOptions, ms) =>
-        Promise.race([
-          transporter.sendMail(mailOptions),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('SMTP bağlantısı vaxt aşımına uğradı (timeout).')), ms)
-          ),
-        ]);
-
-      try {
-        const info = await sendWithTimeout(
-          {
-            from: '"Corporate IT Security" <security@phishguard-sim.test>',
-            to: email,
-            subject,
-            html,
-          },
-          12000
-        );
-        previewUrl = nodemailer.getTestMessageUrl(info) || null;
-      } catch (smtpErr) {
-        // FALLBACK: some hosts (e.g. Render's free tier) block outbound
-        // SMTP entirely, so the real send can time out or be refused no
-        // matter what. Rather than failing the whole simulation, fall back
-        // to a locally-rendered preview of the exact email that would have
-        // been sent, so the training flow still works end-to-end.
-        console.error('⚠️ Real SMTP göndərilmədi, fallback rejiminə keçilir:', smtpErr.message);
-        deliveryMode = 'simulated';
-        previewUrl = buildSimulatedPreview(html);
-      }
-    }
-
-    state.sent += 1;
-    state.lastPreviewUrl = previewUrl;
-
-    const logEntry = {
-      id: Date.now().toString(),
-      email,
-      template,
-      status: 'sent',
-      statusLabel: deliveryMode === 'real' ? '🟢 Göndərildi' : '🟡 Göndərildi (Simulyasiya rejimi)',
-      time: new Date().toISOString(),
-    };
-    state.logs.unshift(logEntry);
-
-    res.json({
-      success: true,
-      message:
-        deliveryMode === 'real'
-          ? 'Simulyasiya e-poçtu göndərildi.'
-          : 'Real SMTP əlçatan olmadı, e-poçt lokal olaraq simulyasiya edildi (məzmun eynidir).',
-      deliveryMode,
-      previewUrl,
-      log: logEntry,
+    // E-poçt göndərilir
+    const info = await mailer.sendMail({
+      from: `"${selectedTemplate.fromName}" <security@sirket-portal.az>`,
+      to: email,
+      subject: selectedTemplate.subject,
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 24px; border: 1px solid #e2e8f0; border-radius: 10px; max-width: 520px; background-color: #ffffff; color: #1a202c;">
+          <h2 style="color: #0f172a; margin-top: 0;">${selectedTemplate.bodyTitle}</h2>
+          <p style="font-size: 15px; color: #475569; line-height: 1.6;">Hörmətli əməkdaş,</p>
+          <p style="font-size: 15px; color: #475569; line-height: 1.6;">${selectedTemplate.bodyText}</p>
+          <div style="margin: 24px 0; text-align: center;">
+            <a href="${LANDING_URL}" style="background-color: #2563eb; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px;">
+              ${selectedTemplate.buttonText}
+            </a>
+          </div>
+          <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+          <p style="font-size: 12px; color: #94a3b8;">Bu bildiriş daxil korporativ təhlükəsizlik sistemi tərəfindən avtomatik yaradılmışdır.</p>
+        </div>
+      `,
     });
-  } catch (err) {
-    console.error('POST /api/send error:', err.message);
-    res.status(500).json({ error: 'E-poçt göndərilərkən xəta baş verdi.', details: err.message });
+
+    // Ethereal ünvanında real məktubun linkini əldə edirik
+    const previewUrl = nodemailer.getTestMessageUrl(info);
+
+    // Statistika və logları yeniləyirik
+    stats.sent += 1;
+    stats.lastPreviewUrl = previewUrl;
+    stats.logs.unshift({
+      id: Date.now(),
+      email: email,
+      time: new Date().toISOString(),
+      statusLabel: 'Göndərildi (Simulyasiya)'
+    });
+
+    console.log(`✉️ Məktub göndərildi: ${email} | Preview: ${previewUrl}`);
+
+    return res.json({
+      success: true,
+      message: 'Simulyasiya e-poçtu uğurla göndərildi!',
+      previewUrl: previewUrl || null
+    });
+
+  } catch (error) {
+    console.error('❌ E-poçt göndərmə xətası:', error);
+    return res.status(500).json({
+      error: 'E-poçt göndərilərkən xəta baş verdi: ' + error.message
+    });
   }
 });
 
-// POST /api/track
+// Tələyə düşənlərin (klikləyənlərin) qeydiyyatı
 app.post('/api/track', (req, res) => {
-  try {
-    const { email } = req.body || {};
+  const { email } = req.body;
 
-    state.clicks += 1;
+  stats.clicks += 1;
 
-    const logEntry = {
-      id: Date.now().toString(),
-      email: email || 'naməlum',
-      template: 'landing-click',
-      status: 'clicked',
-      statusLabel: '🚨 Tələyə Düşdü',
-      time: new Date().toISOString(),
-    };
-    state.logs.unshift(logEntry);
-
-    res.json({
-      success: true,
-      message: 'Klik qeydə alındı.',
-      clicks: state.clicks,
-      log: logEntry,
-    });
-  } catch (err) {
-    console.error('POST /api/track error:', err.message);
-    res.status(500).json({ error: 'Klik qeydə alınarkən xəta baş verdi.' });
+  if (email) {
+    // Uyğun email üzrə son logun statusunu yeniləyirik
+    const existingLog = stats.logs.find((l) => l.email === email);
+    if (existingLog) {
+      existingLog.statusLabel = '⚠️ Tələyə Düşdü (Klikləndi)';
+    }
   }
+
+  console.log(`🚨 Tələyə düşən istifadəçi: ${email || 'Naməlum'}`);
+  return res.json({ success: true });
 });
 
-// Fallback for unknown routes
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint tapılmadı.' });
-});
-
-// Global error handler (keeps the process alive)
-app.use((err, req, res, next) => {
-  console.error('Qlobal xəta:', err);
-  res.status(500).json({ error: 'Gözlənilməz server xətası.' });
-});
-
-// Prevent process crash on unexpected errors
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection:', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-});
-
+// Serverin başlatılması
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 PhishGuard backend ${PORT} portunda işə düşdü.`);
+  console.log(`🚀 PhishGuard Backend serveri ${PORT} portunda çalışır.`);
 });
