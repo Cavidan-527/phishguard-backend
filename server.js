@@ -1,16 +1,24 @@
 // server.js
 // PhishGuard - Phishing Simulation & Security Awareness Platform (Backend)
-// Node.js + Express + Nodemailer (Ethereal test SMTP)
+// Node.js + Express + Resend (HTTPS email API — works on Render free tier,
+// unlike raw SMTP, which Render blocks outbound on ports 25/465/587 for
+// free web services).
 
 const express = require('express');
 const cors = require('cors');
-const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Frontend URL used inside the phishing email's link target
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://phishguard-mauve.vercel.app';
+
+// Resend config — set RESEND_API_KEY in Render's Environment tab.
+// RESEND_FROM defaults to Resend's shared sandbox sender, which works
+// without verifying your own domain (but can then only deliver to the
+// email address you signed up to Resend with).
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const RESEND_FROM = process.env.RESEND_FROM || 'PhishGuard <onboarding@resend.dev>';
 
 // ---------------------------------------------------------------------------
 // MIDDLEWARE
@@ -31,49 +39,6 @@ const state = {
   lastPreviewUrl: null,
   logs: [], // { id, email, template, status, time }
 };
-
-let transporter = null;
-let transporterReady = false;
-
-// ---------------------------------------------------------------------------
-// ETHEREAL TRANSPORTER (ASYNC INIT, NEVER CRASHES THE SERVER)
-// ---------------------------------------------------------------------------
-async function initTransporter() {
-  try {
-    const testAccount = await nodemailer.createTestAccount();
-
-    transporter = nodemailer.createTransport({
-      host: testAccount.smtp.host,
-      port: testAccount.smtp.port,
-      secure: testAccount.smtp.secure,
-      auth: {
-        user: testAccount.user,
-        pass: testAccount.pass,
-      },
-      // CRITICAL: without these, a blocked/slow outbound SMTP connection
-      // (common on free hosting tiers) hangs forever and the request never
-      // resolves, leaving the frontend stuck on "Göndərilir...".
-      connectionTimeout: 10000, // max time to establish TCP connection
-      greetingTimeout: 10000,   // max time to wait for SMTP greeting
-      socketTimeout: 15000,     // max time of inactivity on the socket
-      // Force IPv4. Many cloud hosts (Render, Railway, Heroku, etc.) resolve
-      // the SMTP host to an IPv6 address that has broken/absent outbound
-      // routing in that environment, causing the TCP handshake to hang or
-      // time out (ETIMEDOUT) even though IPv4 would connect instantly.
-      family: 4,
-    });
-
-    transporterReady = true;
-    console.log('✅ Ethereal test SMTP account created:', testAccount.user);
-  } catch (err) {
-    transporterReady = false;
-    console.error('❌ Ethereal transporter init failed:', err.message);
-    // Retry after a delay instead of crashing the process
-    setTimeout(initTransporter, 10000);
-  }
-}
-
-initTransporter();
 
 // ---------------------------------------------------------------------------
 // EMAIL TEMPLATES
@@ -138,13 +103,58 @@ function buildEmailHtml(template, link) {
   };
 }
 
+// Builds a data-URI preview of the given HTML so the exact email content can
+// still be opened/viewed even when no real delivery is available.
+function buildSimulatedPreview(html) {
+  const encodedHtml = Buffer.from(html, 'utf-8').toString('base64');
+  return `data:text/html;base64,${encodedHtml}`;
+}
+
+// Sends via the Resend HTTPS API (fetch is global in Node 18+). This avoids
+// raw SMTP sockets entirely, so it is not affected by Render's free-tier
+// block on outbound SMTP ports (25/465/587).
+async function sendViaResend({ to, subject, html }, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: RESEND_FROM,
+        to: [to],
+        subject,
+        html,
+      }),
+      signal: controller.signal,
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      // Surface Resend's own error message (e.g. sandbox restriction:
+      // "You can only send testing emails to your own email address").
+      const msg = (data && (data.message || data.error)) || `Resend API xətası (HTTP ${res.status}).`;
+      throw new Error(msg);
+    }
+
+    return data; // { id: "..." }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ROUTES
 // ---------------------------------------------------------------------------
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'PhishGuard API', transporterReady });
+  res.json({ status: 'ok', service: 'PhishGuard API', resendConfigured: Boolean(RESEND_API_KEY) });
 });
 
 // GET /api/stats
@@ -162,13 +172,6 @@ app.get('/api/stats', (req, res) => {
   }
 });
 
-// Builds a data-URI preview of the given HTML so the exact email content can
-// still be opened/viewed even when no real SMTP delivery is available.
-function buildSimulatedPreview(html) {
-  const encodedHtml = Buffer.from(html, 'utf-8').toString('base64');
-  return `data:text/html;base64,${encodedHtml}`;
-}
-
 // POST /api/send
 app.post('/api/send', async (req, res) => {
   try {
@@ -183,60 +186,24 @@ app.post('/api/send', async (req, res) => {
 
     let previewUrl = null;
     let deliveryMode = 'real'; // 'real' | 'simulated'
+    let deliveryNote = null;
 
-    if (!transporterReady || !transporter) {
-      // Ethereal account creation itself needs outbound network access.
-      // If that's blocked/unavailable, skip straight to simulated mode
-      // instead of making the user wait on a 503 that never resolves.
-      console.error('⚠️ Transporter hazır deyil, birbaşa simulyasiya rejiminə keçilir.');
+    if (!RESEND_API_KEY) {
+      console.error('⚠️ RESEND_API_KEY təyin olunmayıb, simulyasiya rejiminə keçilir.');
       deliveryMode = 'simulated';
+      deliveryNote = 'RESEND_API_KEY konfiqurasiya olunmayıb.';
       previewUrl = buildSimulatedPreview(html);
     } else {
-      const sendWithTimeout = (mailOptions, ms) =>
-        Promise.race([
-          transporter.sendMail(mailOptions),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('SMTP bağlantısı vaxt aşımına uğradı (timeout).')), ms)
-          ),
-        ]);
-
-      const mailOptions = {
-        from: '"Corporate IT Security" <security@phishguard-sim.test>',
-        to: email,
-        subject,
-        html,
-      };
-
-      // Retry a few times: SMTP timeouts on shared cloud egress are often
-      // intermittent (a flaky hop or a momentarily congested route), so a
-      // second or third attempt frequently succeeds where the first didn't.
-      const MAX_ATTEMPTS = 3;
-      let lastErr = null;
-      let sentOk = false;
-
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS && !sentOk; attempt++) {
-        try {
-          const info = await sendWithTimeout(mailOptions, 10000);
-          previewUrl = nodemailer.getTestMessageUrl(info) || null;
-          sentOk = true;
-          if (attempt > 1) {
-            console.log(`✅ Real SMTP ${attempt}. cəhddə uğurlu oldu.`);
-          }
-        } catch (smtpErr) {
-          lastErr = smtpErr;
-          console.error(`⚠️ SMTP cəhd ${attempt}/${MAX_ATTEMPTS} uğursuz oldu:`, smtpErr.message);
-          if (attempt < MAX_ATTEMPTS) {
-            await new Promise((r) => setTimeout(r, 1500 * attempt)); // short backoff
-          }
-        }
-      }
-
-      if (!sentOk) {
-        // FALLBACK: all real attempts failed, so fall back to a
-        // locally-rendered preview of the exact email that would have been
-        // sent, so the training flow still works end-to-end.
-        console.error('⚠️ Bütün SMTP cəhdləri uğursuz oldu, fallback rejiminə keçilir:', lastErr && lastErr.message);
+      try {
+        await sendViaResend({ to: email, subject, html });
+        console.log(`✅ Resend ilə göndərildi: ${email}`);
+      } catch (sendErr) {
+        // FALLBACK: covers an invalid/missing API key, Resend's sandbox
+        // recipient restriction, rate limits, or any transient API error.
+        // We never fail the whole simulation because of a delivery hiccup.
+        console.error('⚠️ Resend göndərmədi, fallback rejiminə keçilir:', sendErr.message);
         deliveryMode = 'simulated';
+        deliveryNote = sendErr.message;
         previewUrl = buildSimulatedPreview(html);
       }
     }
@@ -249,7 +216,7 @@ app.post('/api/send', async (req, res) => {
       email,
       template,
       status: 'sent',
-      statusLabel: deliveryMode === 'real' ? '🟢 Göndərildi' : '🟡 Göndərildi (Simulyasiya rejimi)',
+      statusLabel: deliveryMode === 'real' ? '🟢 Göndərildi (Real)' : '🟡 Göndərildi (Simulyasiya rejimi)',
       time: new Date().toISOString(),
     };
     state.logs.unshift(logEntry);
@@ -258,8 +225,8 @@ app.post('/api/send', async (req, res) => {
       success: true,
       message:
         deliveryMode === 'real'
-          ? 'Simulyasiya e-poçtu göndərildi.'
-          : 'Real SMTP əlçatan olmadı, e-poçt lokal olaraq simulyasiya edildi (məzmun eynidir).',
+          ? `E-poçt real olaraq ${email} ünvanına göndərildi. Inboxunuzu yoxlayın.`
+          : `Real göndəriş alınmadı (${deliveryNote || 'bilinməyən səbəb'}), e-poçt lokal olaraq simulyasiya edildi.`,
       deliveryMode,
       previewUrl,
       log: logEntry,
@@ -319,5 +286,5 @@ process.on('uncaughtException', (err) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 PhishGuard backend ${PORT} portunda işə düşdü.`);
+  console.log(`🚀 PhishGuard backend ${PORT} portunda işə düşdü. Resend konfiqurasiyası: ${RESEND_API_KEY ? 'VAR' : 'YOXDUR'}`);
 });
